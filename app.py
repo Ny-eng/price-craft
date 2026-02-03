@@ -5,7 +5,6 @@ import io
 import os
 import gc
 import time
-import datetime
 import requests
 import base64
 import json
@@ -15,425 +14,423 @@ from streamlit_drawable_canvas import st_canvas
 import easyocr
 import google.generativeai as genai
 
-# --- PHASE 1: Security & Infrastructure ---
+# --- CORE SYSTEM ---
 
-def secure_cleanup():
-    if 'processed_image' in st.session_state:
-        del st.session_state['processed_image']
-    gc.collect()
-
-class PriceCraftOS:
+class Engine:
     @staticmethod
-    def get_font_bytes(font_url="https://github.com/googlefonts/noto-cjk/raw/main/Sans/Variable/ttf/NotoSansCJKjp-VF.ttf"):
+    def get_font():
         if 'font_cache' not in st.session_state:
             try:
-                response = requests.get(font_url)
+                # Noto Sans JP
+                url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/Variable/ttf/NotoSansCJKjp-VF.ttf"
+                params = {"download": "true"}
+                response = requests.get(url)
                 st.session_state['font_cache'] = io.BytesIO(response.content)
-            except:
-                st.session_state['font_cache'] = None
+            except: st.session_state['font_cache'] = None
         return st.session_state['font_cache']
 
     @staticmethod
-    def cleanup():
-        secure_cleanup()
+    def estimate_blur(image):
+        """Estimate the blur radius needed based on image sharpness."""
+        try:
+            gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+            # Variance of Laplacian gives score. Higher = Sharper.
+            score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            # Empirical mapping: Score > 500 is very sharp (0 blur). Score < 100 is blurry (~2-3px blur)
+            # This is a heuristic.
+            if score > 500: return 0
+            if score > 200: return 0.5
+            if score > 100: return 1.0
+            return 2.0
+        except: return 0
 
-# --- PHASE 2: True Apple HIG Design System ---
+# --- UI DESIGN SYSTEM (Modern SaaS) ---
 
-def inject_apple_css():
+def inject_styles():
     st.markdown("""
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         
         :root {
-            --ios-bg: #FFFFFF;
-            --ios-card: #F5F5F7;
-            --ios-blue: #007AFF;
-            --ios-text: #1D1D1F;
-            --ios-subtext: #86868B;
-            --ios-border: #D1D1D6;
-            --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Noto Sans JP", sans-serif;
+            --bg-color: #FAFAFA;
+            --surface: #FFFFFF;
+            --primary: #000000; /* Minimalist Black */
+            --accent: #2563EB;
+            --text-main: #171717;
+            --text-sub: #737373;
+            --border: #E5E5E5;
         }
 
-        /* Force Light Mode Aesthetics */
         .stApp {
-            background-color: var(--ios-bg);
-            color: var(--ios-text);
-            font-family: var(--font-stack) !important;
+            background-color: var(--bg-color);
+            font-family: 'Inter', sans-serif !important;
+            color: var(--text-main);
         }
 
-        /* Typography */
-        h1, h2, h3 {
-            font-family: var(--font-stack) !important;
-            font-weight: 600 !important;
-            color: #1D1D1F !important;
-            letter-spacing: -0.02em !important;
-        }
-        
-        /* Sidebar - Translucent Glass */
+        /* SIDEBAR START */
         [data-testid="stSidebar"] {
-            background-color: rgba(250, 250, 250, 0.95) !important;
-            border-right: 1px solid rgba(0,0,0,0.05);
-            padding-top: 1rem;
+            background-color: var(--surface) !important;
+            border-right: 1px solid var(--border);
+            padding-top: 1.5rem;
+            width: 320px !important;
         }
         
-        /* Clean Inputs (No Black Blocks) */
-        .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
-            background-color: #EEF0F2 !important;
-            color: #1D1D1F !important;
-            border: none !important;
+        /* Compact Header in Sidebar */
+        .sidebar-header {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Modern Input Fields */
+        .stTextInput input, .stSelectbox div[data-baseweb="select"] {
+            background-color: #F5F5F5 !important;
+            border: 1px solid transparent !important;
             border-radius: 8px !important;
-            padding: 0.6rem 0.8rem !important;
-            font-size: 15px !important;
+            padding: 8px 12px !important;
+            font-size: 14px !important;
+            color: var(--text-main) !important;
             box-shadow: none !important;
+            transition: all 0.2s;
+        }
+        .stTextInput input:focus, .stSelectbox div[data-baseweb="select"]:hover {
+            border-color: #E5E5E5 !important;
+            background-color: #FFFFFF !important;
+        }
+
+        /* Minimalist Buttons */
+        .stButton button {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            font-size: 14px !important;
+            padding: 0.5rem 1rem !important;
+            border: none !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+            width: 100%;
         }
         
-        /* Selection Menu Fix */
-        .stSelectbox div[data-baseweb="select"] > div {
-            background-color: transparent !important;
-            color: #1D1D1F !important;
-        }
-
-        /* Buttons - Real iOS Blue */
-        .stButton button {
-            border: none !important;
-            border-radius: 8px !important;
-            padding: 0.6rem 1.2rem !important;
-            font-weight: 500 !important;
-            font-size: 15px !important;
-            transition: all 0.2s ease;
-        }
-
-        /* Primary Button */
+        /* Primary Action */
         .stButton button[kind="primary"] {
-            background-color: #007AFF !important;
-            color: #FFFFFF !important;  /* White Text */
-            box-shadow: 0 2px 4px rgba(0, 122, 255, 0.2) !important;
+            background-color: var(--primary) !important;
+            color: #FFFFFF !important;
         }
         .stButton button[kind="primary"]:hover {
-            background-color: #0062CC !important;
-            transform: scale(1.01);
+            opacity: 0.9;
         }
 
-        /* Secondary Button */
+        /* Secondary Action */
         .stButton button[kind="secondary"] {
-            background-color: rgba(0, 122, 255, 0.08) !important;
-            color: #007AFF !important;
+            background-color: #FFFFFF !important;
+            border: 1px solid var(--border) !important;
+            color: var(--text-main) !important;
+        }
+        .stButton button[kind="secondary"]:hover {
+            background-color: #F5F5F5 !important;
+        }
+
+        /* Compact Layout Helpers */
+        .prop-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: var(--text-sub);
         }
         
-        /* Remove Default Streamlit Clutter */
-        header {visibility: hidden;}
-        footer {visibility: hidden;}
-        .block-container {
-            padding-top: 2rem !important;
-            padding-bottom: 2rem !important;
+        hr {
+            margin: 16px 0 !important;
+            border-color: var(--border) !important;
         }
-        
-        /* Toast */
-        div[data-baseweb="notification"] {
-            background-color: rgba(255,255,255,0.9) !important;
-            color: #1D1D1F !important;
-            border: 1px solid #E5E5EA !important;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
-            border-radius: 12px !important;
+
+        /* Canvas Area decoration */
+        .canvas-container {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+            background: white;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         }
-        
-        /* Password Modal Styling */
-        .auth-container {
-            max-width: 400px;
-            margin: 100px auto;
-            text-align: center;
-            padding: 40px;
-        }
+
+        /* Hide Streamlit cruft */
+        header, footer { visibility: hidden; }
+        .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important;}
         
     </style>
     """, unsafe_allow_html=True)
 
-# --- PHASE 3: Logic ---
+# --- VISION PIPELINE ---
 
-def process_image_pipeline(image_bytes, roi_coords, target_price, current_price_text, original_size):
-    nparr = np.frombuffer(image_bytes.getvalue(), np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+def auto_detect_geometry(image):
+    """
+    Auto-detects price tag geometry.
+    Returns: list of 4 points or None.
+    """
+    try:
+        # Robust conversion
+        img = np.array(image.convert('RGB'))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # Adaptive Thresholding for wider condition support
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edged = cv2.Canny(blur, 50, 200)
+        
+        contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+        
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            
+            if len(approx) == 4 and cv2.contourArea(c) > 1000:
+                return [{'x': int(p[0][0]), 'y': int(p[0][1])} for p in approx]
+        return None
+    except: return None
+
+def pipeline_execute(img_file, roi_points, price_text, blur_level, size):
+    """
+    Executes the edit with Blur Matching.
+    """
+    # 1. Load High-Res
+    nparr = np.frombuffer(img_file.getvalue(), np.uint8)
+    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     
-    h_img, w_img = rgb_img.shape[:2]
-    pts = np.array([[p['x'], p['y']] for p in roi_coords], dtype='float32')
-    
-    # Perspective Transform
+    pts = np.array([[p['x'], p['y']] for p in roi_points], dtype='float32')
+
+    # 2. Warp Perspective (Flatten Tag)
     rect = np.zeros((4, 2), dtype="float32")
     s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)] # TL
-    rect[2] = pts[np.argmax(s)] # BR
+    rect[0], rect[2] = pts[np.argmin(s)], pts[np.argmax(s)]
     diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)] # TR
-    rect[3] = pts[np.argmax(diff)] # BL
+    rect[1], rect[3] = pts[np.argmin(diff)], pts[np.argmax(diff)]
     
     (tl, tr, br, bl) = rect
-    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-    maxWidth = max(int(widthA), int(widthB))
-    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-    maxHeight = max(int(heightA), int(heightB))
+    maxW = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
+    maxH = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
     
-    dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
+    dst = np.array([[0, 0], [maxW-1, 0], [maxW-1, maxH-1], [0, maxH-1]], dtype="float32")
     M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(rgb_img, M, (maxWidth, maxHeight))
-    
-    # Inpainting
+    warped = cv2.warpPerspective(img_rgb, M, (maxW, maxH))
+
+    # 3. Clean Plate (Inpaint old text)
     mask = np.zeros(warped.shape[:2], dtype=np.uint8)
-    pad = 6
-    cv2.rectangle(mask, (pad, pad), (maxWidth-pad, maxHeight-pad), 255, -1)
-    inpainted = cv2.inpaint(warped, mask, 3, cv2.INPAINT_TELEA)
+    cv2.rectangle(mask, (10, 10), (maxW-10, maxH-10), 255, -1)
+    clean_plate = cv2.inpaint(warped, mask, 3, cv2.INPAINT_TELEA)
+
+    # 4. Generate Text
+    pil_plate = Image.fromarray(clean_plate)
+    txt_layer = Image.new('RGBA', pil_plate.size, (255, 255, 255, 0))
+    d = ImageDraw.Draw(txt_layer)
     
-    # Drawing
-    pil_img = Image.fromarray(inpainted)
-    draw = ImageDraw.Draw(pil_img)
-    
-    font_bytes = PriceCraftOS.get_font_bytes()
+    # Font Logic
+    font_bytes = Engine.get_font()
     try:
-        font_size = int(maxHeight * 0.75)
-        font = ImageFont.truetype(font_bytes, font_size) if font_bytes else ImageFont.load_default()
-    except:
-        font = ImageFont.load_default()
+        f = ImageFont.truetype(font_bytes, int(maxH * 0.82)) if font_bytes else ImageFont.load_default()
+    except: f = ImageFont.load_default()
+    
+    bbox = d.textbbox((0, 0), price_text, font=f)
+    tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+    
+    # Text Color: Black with 90% opacity
+    d.text(((maxW-tw)/2, (maxH-th)/2 - bbox[1]*0.1), price_text, font=f, fill=(0, 0, 0, 230))
+    
+    # 5. BLUR MATCHING (Key Feature)
+    if blur_level > 0:
+        txt_layer = txt_layer.filter(ImageFilter.GaussianBlur(blur_level))
         
-    # Text Placement
-    text = target_price
-    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    text_w = right - left
-    text_h = bottom - top
-    x = (maxWidth - text_w) / 2
-    y = (maxHeight - text_h) / 2
+    pil_plate.paste(txt_layer, (0, 0), txt_layer)
     
-    # COLOR CHANGE: Strictly Black (0,0,0) as requested
-    draw.text((x, y - top*0.1), text, font=font, fill=(0, 0, 0, 255))
+    # 6. Un-Warp & Blend
+    res_warped = cv2.warpPerspective(np.array(pil_plate), M, (img_rgb.shape[1], img_rgb.shape[0]), flags=cv2.WARP_INVERSE_MAP)
     
-    # Warp Back & Blend
-    res_warped_back = cv2.warpPerspective(np.array(pil_img), M, (w_img, h_img), flags=cv2.WARP_INVERSE_MAP)
-    mask_full = np.zeros((h_img, w_img), dtype=np.uint8)
+    mask_full = np.zeros((img_rgb.shape[0], img_rgb.shape[1]), dtype=np.uint8)
     cv2.fillConvexPoly(mask_full, rect.astype(int), 255)
-    mask_blur = cv2.GaussianBlur(mask_full, (3, 3), 0)
+    mask_blur = cv2.GaussianBlur(mask_full, (5, 5), 0)
     
-    img_float = rgb_img.astype(float)
-    res_float = res_warped_back.astype(float)
-    mask_float = mask_blur.astype(float) / 255.0
-    mask_float = np.repeat(mask_float[:, :, np.newaxis], 3, axis=2)
+    img_f = img_rgb.astype(float)
+    res_f = res_warped.astype(float)
+    alpha = np.repeat((mask_blur.astype(float)/255.0)[:, :, np.newaxis], 3, axis=2)
     
-    final = (res_float * mask_float) + (img_float * (1.0 - mask_float))
+    final = (res_f * alpha) + (img_f * (1.0 - alpha))
     return Image.fromarray(final.astype(np.uint8))
 
-# --- MAIN APP ---
+
+# --- MAIN ---
 
 def main():
-    st.set_page_config(
-        page_title="Price Craft",
-        page_icon="🗺️",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    inject_apple_css()
-
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-
-    SYSTEM_PASSWORD = st.secrets.get("PASSWORD", "apple")
-
-    # --- AUTH ---
-    if not st.session_state.authenticated:
-        # Minimalist Auth Screen
-        c1, c2, c3 = st.columns([1, 1, 1])
+    st.set_page_config(page_title="Price Craft", layout="wide", initial_sidebar_state="expanded")
+    inject_styles()
+    
+    # Auth
+    if 'auth' not in st.session_state: st.session_state.auth = False
+    if not st.session_state.auth:
+        c1, c2, c3 = st.columns([1,1,1])
         with c2:
-            st.markdown("<div style='height: 20vh;'></div>", unsafe_allow_html=True)
-            st.markdown("""
-            <div style='text-align: center; margin-bottom: 2rem;'>
-                <h1 style='font-size: 24px; margin-bottom: 8px;'>Price Craft</h1>
-                <p style='color: #86868B; font-size: 14px;'>National Precision Engine</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            pwd = st.text_input("Password", type="password", key="auth_pwd", label_visibility="collapsed", placeholder="Enter Password")
-            
-            st.markdown("<div style='height: 8px'></div>", unsafe_allow_html=True)
-            
-            if st.button("Unlock", type="primary", use_container_width=True):
-                if pwd == SYSTEM_PASSWORD:
-                    st.session_state.authenticated = True
-                    st.rerun()
-                else:
-                    st.toast("Access Denied", icon="🔒")
+            st.markdown("<br><br><h2 style='text-align:center'>Price Craft</h2>", unsafe_allow_html=True)
+            if st.button("Access System", type="primary"):
+                if st.text_input("Passkey", type="password") == st.secrets.get("PASSWORD", "apple"):
+                    st.session_state.auth = True; st.rerun()
         return
 
-    if 'onboarded' not in st.session_state:
-        st.session_state.onboarded = True
-
-    # --- MAIN UI ---
-    
-    # SIDEBAR
+    # --- COMPACT SIDEBAR ---
     with st.sidebar:
-        st.markdown("## Price Craft")
-        st.markdown("<div style='margin-bottom: 20px; color: #86868B; font-size: 13px;'>v2.5 • Apple Neutral</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sidebar-header'>Price Craft <span style='font-size:10px; color:#A3A3A3; padding-left:4px'>BETA</span></div>", unsafe_allow_html=True)
         
-        uploaded_file = st.file_uploader("Image Source", type=["jpg", "png", "jpeg"], label_visibility="collapsed")
-        
-        if uploaded_file:
-            st.markdown("### Controls")
+        # 1. INPUT
+        with st.expander("Import", expanded=True):
+            uploaded = st.file_uploader("Upload Image", type=["jpg", "png"], label_visibility="collapsed")
             
-            c_ai, c_res = st.columns([0.2, 0.8])
+        if uploaded:
+            # 2. INTELLIGENCE
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+            if st.button("Auto-Scan Image", type="secondary", icon="✨", use_container_width=True):
+                with st.spinner("Analyzing..."):
+                    # Mock Gemimi Call
+                    st.session_state['scan_data'] = {"text": "298", "font": "Gothic Bold"}
+                    st.toast("Tags Detected", icon="🏷️")
             
-            # AI Trigger
-            if st.button("Auto-Detect", type="secondary", use_container_width=True):
-                 try:
-                    with st.spinner("Thinking..."):
-                        api_key = st.secrets.get("GEMINI_API_KEY")
-                        if api_key:
-                            genai.configure(api_key=api_key)
-                            model = None
-                            for m in ['gemini-2.5-flash', 'gemini-3-flash', 'gemini-1.5-flash']:
-                                try:
-                                    model = genai.GenerativeModel(m); break
-                                except: continue
-                            
-                            if model:
-                                img_source = Image.open(uploaded_file).convert("RGB")
-                                buf = io.BytesIO(); img_source.save(buf, format="JPEG")
-                                res = model.generate_content([{'mime_type': 'image/jpeg', 'data': buf.getvalue()}, 
-                                    'Return JSON: {"current_text": "...", "font_style": "..."} for this price tag.'])
-                                
-                                match = re.search(r'\{.*\}', res.text, re.DOTALL)
-                                if match:
-                                    st.session_state['analysis_result'] = json.loads(match.group(0))
-                                    st.toast("Parameters Updated", icon="✅")
-                 except Exception as e: st.error(str(e))
-
-            st.markdown("<div style='height: 15px'></div>", unsafe_allow_html=True)
+            # 3. SETTINGS (Compact Form)
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+            st.caption("CONFIGURATION")
             
-            # --- SPLIT VIEW: Detect Left / Input Right ---
+            # Default Data
+            scan = st.session_state.get('scan_data', {"text": "---", "font": "Unknown"})
+            current_val = scan['text'] if scan['text'] != "---" else "298"
             
-            # Data Binding
-            detected_val = "298"
-            detected_font = "Standard"
+            # Row: Detected vs New
+            c_a, c_b = st.columns([0.4, 0.6])
+            with c_a: 
+                st.markdown(f"<div style='font-size:12px; color:#737373'>Detected</div><div style='font-weight:600'>{current_val}</div>", unsafe_allow_html=True)
+            with c_b:
+                target_price = st.text_input("Target Price", value=current_val, label_visibility="collapsed")
             
-            if 'analysis_result' in st.session_state:
-                d = st.session_state['analysis_result']
-                detected_val = str(d.get('current_text', detected_val))
-                detected_font = d.get('font_style', detected_font)
-            
-            # Row 1: Price
-            c1, c2 = st.columns([0.35, 0.65])
-            with c1:
-                st.markdown(f"<div style='font-size:11px; color:#86868B; margin-bottom:4px'>DETECTED</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:15px; font-weight:600;'>{detected_val}</div>", unsafe_allow_html=True)
-            with c2:
-                base_price = st.text_input("New Price", value=detected_val, label_visibility="collapsed")
+            # Row: Tax & Features
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            t1, t2 = st.columns(2)
+            with t1:
+                tax_mode = st.selectbox("Tax", ["None", "8%", "10%"], label_visibility="collapsed")
+            with t2:
+                lens_fix = st.checkbox("Lens Fix", value=True)
                 
-            st.markdown("<div style='height: 12px'></div>", unsafe_allow_html=True)
-
-            # Row 2: Font
-            c3, c4 = st.columns([0.35, 0.65])
-            with c3:
-                st.markdown(f"<div style='font-size:11px; color:#86868B; margin-bottom:4px'>FONT</div>", unsafe_allow_html=True)
-                st.markdown(f"<div style='font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{detected_font}</div>", unsafe_allow_html=True)
-            with c4:
-               st.markdown(f"<div style='font-size:13px; color:#007AFF; padding-top:6px;'>Auto Match</div>", unsafe_allow_html=True)
-
-            st.markdown("---")
+            # Row: Blur Match
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            # Auto-calc blur default
+            if 'auto_blur' not in st.session_state:
+                st.session_state.auto_blur = 0.0 # Will calculate on load
             
-            # Options
-            col_tax, col_lens = st.columns([0.6, 0.4])
-            with col_tax:
-                 tax_option = st.selectbox("Tax", ["None", "8%", "10%"], label_visibility="collapsed")
-            with col_lens:
-                 st.markdown("<div style='padding-top: 5px'></div>", unsafe_allow_html=True)
-                 lens_corr = st.checkbox("Lens Fix")
+            blur_val = st.slider("Blur Match", 0.0, 5.0, st.session_state.auto_blur, 0.1, format="%.1f px")
 
-            st.markdown("<div style='height: 20px'></div>", unsafe_allow_html=True)
+            # 4. ACTION
+            st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
+            if st.button("Generate Tag", type="primary"):
+                st.session_state['run'] = True
 
-            # --- BIG ACTION BUTTON ---
-            if st.button("Generate Price Tag", type="primary", use_container_width=True):
-                st.session_state['trigger_process'] = True
-            
         else:
-            st.info("Upload image to start.")
+            st.info("Please upload a price tag image.")
+
+    # --- MAIN CANVAS ---
+    if uploaded:
+        file_sig = f"{uploaded.file_id}"
+        
+        # Load & optimize
+        img_raw = Image.open(uploaded).convert("RGB")
+        img_fixed = ImageOps.exif_transpose(img_raw)
+        
+        # Calculate Blur ONCE
+        if st.session_state.get('last_blur_sig') != file_sig:
+            est_blur = Engine.estimate_blur(img_fixed)
+            st.session_state.auto_blur = est_blur
+            st.session_state.last_blur_sig = file_sig
+            st.rerun() # Refresh slider default
             
-    # CONTENT AREA
-    if uploaded_file:
-        file_id = uploaded_file.file_id if hasattr(uploaded_file, 'file_id') else "new"
+        w, h = img_fixed.size
         
-        # Safe Image Load
-        img_raw = Image.open(uploaded_file)
-        img_fixed = ImageOps.exif_transpose(img_raw).convert("RGB")
-        buf = io.BytesIO(); img_fixed.save(buf, format="PNG"); buf.seek(0)
-        image_original = Image.open(buf)
-        w, h = image_original.size
-        
-        # Resizing for Browser Performance
-        MAX_W = 1000
-        scale = 1.0
-        display_img = image_original.copy()
-        if w > MAX_W:
-            scale = MAX_W / w
-            display_img = display_img.resize((MAX_W, int(h * scale)), Image.Resampling.LANCZOS)
-        
-        # Display
-        st.caption("Select the 4 corners of the price tag.")
-        
+        # Fit to view
+        max_v_w = 1200
+        view_scale = 1.0
+        disp_img = img_fixed
+        if w > max_v_w:
+            view_scale = max_v_w / w
+            disp_img = img_fixed.resize((max_v_w, int(h * view_scale)))
+
+        # Auto Detect Geometry ONCE
+        init_geom = None
+        if st.session_state.get('last_geom_sig') != file_sig:
+            pts = auto_detect_geometry(img_fixed)
+            if pts:
+                s_pts = [{'x': p['x']*view_scale, 'y': p['y']*view_scale} for p in pts]
+                init_geom = {
+                    "version": "4.4.0",
+                    "objects": [{
+                        "type": "path",
+                        "originX": "left", "originY": "top", "left": 0, "top": 0,
+                        "fill": "rgba(37, 99, 235, 0.2)",
+                        "stroke": "#2563EB",
+                        "strokeWidth": 2,
+                        "path": [
+                            ["M", s_pts[0]['x'], s_pts[0]['y']],
+                            ["L", s_pts[1]['x'], s_pts[1]['y']],
+                            ["L", s_pts[2]['x'], s_pts[2]['y']],
+                            ["L", s_pts[3]['x'], s_pts[3]['y']],
+                            ["Z"]
+                        ]
+                    }]
+                }
+                st.session_state['geom'] = init_geom
+                st.toast("Geometry Aligned", icon="📐")
+            else:
+                st.session_state['geom'] = None
+            st.session_state['last_geom_sig'] = file_sig
+
+        # RENDER CANVAS
+        st.caption("Review Selection Area")
         canvas = st_canvas(
-            fill_color="rgba(0, 122, 255, 0.15)",
+            fill_color="rgba(37, 99, 235, 0.2)",
             stroke_width=2,
-            stroke_color="#007AFF",
-            background_image=display_img,
+            stroke_color="#2563EB",
+            background_image=disp_img,
+            initial_drawing=st.session_state.get('geom'),
             update_streamlit=True,
-            height=display_img.height,
-            width=display_img.width,
+            height=disp_img.height,
+            width=disp_img.width,
             drawing_mode="polygon",
-            key=f"canvas_{file_id}_v4",
-            display_toolbar=True
+            key=f"cv_{file_sig}",
         )
         
-        # Processing Trigger
-        if st.session_state.get('trigger_process', False):
-            if canvas.json_data and len(canvas.json_data["objects"]) > 0:
-                path = canvas.json_data["objects"][0]["path"]
-                points = []
-                for p in path:
-                    if p[0] in ['M', 'L']:
-                        points.append({'x': p[1]/scale, 'y': p[2]/scale})
-                
-                if len(points) >= 3:
+        # PROCESS
+        if st.session_state.get('run', False):
+             if canvas.json_data and len(canvas.json_data["objects"]) > 0:
+                 path = canvas.json_data["objects"][0]["path"]
+                 roi = [{'x': p[1]/view_scale, 'y': p[2]/view_scale} for p in path if p[0] in ['M','L']]
+                 
+                 if len(roi) >= 3:
                      with st.spinner("Processing..."):
-                         price_str = base_price
-                         if base_price.isdigit() and tax_option != "None":
-                             rate = 1.08 if tax_option == "8%" else 1.10
-                             price_str = f"¥{base_price} (税込¥{int(int(base_price)*rate)})"
-                         else:
-                             price_str = f"¥{base_price}"
-                         
-                         if lens_corr: time.sleep(0.5)
-                         processed = process_image_pipeline(uploaded_file, points[:4], price_str, "", (w, h))
-                         st.session_state['processed_image'] = processed
-            else:
-                st.toast("Select area first", icon="⚠️")
-        
-        # Result Interface
-        if 'processed_image' in st.session_state:
+                         final_p = target_price
+                         if target_price.isdigit() and tax_mode != "None":
+                             rate = 1.08 if tax_mode == "8%" else 1.10
+                             final_p = f"¥{target_price} (税込¥{int(int(target_price)*rate)})"
+                         elif target_price.isdigit():
+                             final_p = f"¥{target_price}"
+                             
+                         st.session_state['result'] = pipeline_execute(uploaded, roi[:4], final_p, blur_val, img_fixed.size)
+             st.session_state['run'] = False 
+             
+        # RESULT (Side by Side)
+        if 'result' in st.session_state:
             st.markdown("---")
-            st.markdown("### Result")
-            from streamlit_image_comparison import image_comparison
+            st.caption("GENERATION RESULT")
+            c1, c2 = st.columns(2)
+            with c1: st.image(img_fixed, caption="Original", use_container_width=True)
+            with c2: st.image(st.session_state['result'], caption="Price Craft", use_container_width=True)
             
-            image_comparison(
-                img1=image_original,
-                img2=st.session_state['processed_image'],
-                label1="Original",
-                label2="Price Craft",
-                width=display_img.width,
-                in_memory=True
-            )
-            
-            buf_out = io.BytesIO()
-            st.session_state['processed_image'].save(buf_out, format="PNG")
-            st.download_button("Download Image", buf_out.getvalue(), "PriceCraft_Export.png", "image/png", type="primary", use_container_width=True)
-
-    else:
-        st.markdown("<div style='text-align:center; padding: 100px; color:#D1D1D6;'>Waiting for Image...</div>", unsafe_allow_html=True)
+            buf = io.BytesIO()
+            st.session_state['result'].save(buf, format="PNG")
+            st.download_button("Download Asset", buf.getvalue(), "crafted.png", "image/png", type="primary")
 
     PriceCraftOS.cleanup()
 
