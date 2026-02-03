@@ -72,6 +72,8 @@ def inject_styles():
         .stTextInput input, .stSelectbox div[data-baseweb="select"], div[data-baseweb="base-input"] {
             background-color: #F5F5F5 !important;
             color: #000000 !important; /* Explicit Black */
+            -webkit-text-fill-color: #000000 !important;
+            opacity: 1 !important;
             border: 1px solid #E5E5E5 !important;
             border-radius: 8px !important;
             caret-color: #000000 !important;
@@ -81,6 +83,12 @@ def inject_styles():
         [data-testid="stSidebar"] {
             background-color: var(--surface) !important;
             border-right: 1px solid var(--border);
+            padding-top: 1rem !important;
+        }
+        
+        /* Adjust header gap */
+        div[data-testid="stSidebar"] .block-container {
+            padding-top: 0rem !important;
         }
 
         /* Buttons */
@@ -106,9 +114,102 @@ def inject_styles():
     </style>
     """, unsafe_allow_html=True)
 
-# ... (Vision Pipeline remains unchanged) ...
-# (We assume helper classes Engine and functions auto_detect_geometry, pipeline_execute exist as before. 
-# but the replace_file_content tool requires context. I will target the styles and main function areas)
+# --- VISION PIPELINE ---
+
+def auto_detect_geometry(image):
+    """
+    Auto-detects price tag geometry.
+    Returns: list of 4 points or None.
+    """
+    try:
+        # Robust conversion
+        img = np.array(image.convert('RGB'))
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        
+        # Adaptive Thresholding for wider condition support
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edged = cv2.Canny(blur, 50, 200)
+        
+        contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+        
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            
+            if len(approx) == 4 and cv2.contourArea(c) > 1000:
+                return [{'x': int(p[0][0]), 'y': int(p[0][1])} for p in approx]
+        return None
+    except: return None
+
+def pipeline_execute(img_file, roi_points, price_text, blur_level, size):
+    """
+    Executes the edit with Blur Matching.
+    """
+    # 1. Load High-Res
+    nparr = np.frombuffer(img_file.getvalue(), np.uint8)
+    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    
+    pts = np.array([[p['x'], p['y']] for p in roi_points], dtype='float32')
+
+    # 2. Warp Perspective (Flatten Tag)
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0], rect[2] = pts[np.argmin(s)], pts[np.argmax(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1], rect[3] = pts[np.argmin(diff)], pts[np.argmax(diff)]
+    
+    (tl, tr, br, bl) = rect
+    maxW = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
+    maxH = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
+    
+    dst = np.array([[0, 0], [maxW-1, 0], [maxW-1, maxH-1], [0, maxH-1]], dtype="float32")
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(img_rgb, M, (maxW, maxH))
+
+    # 3. Clean Plate (Inpaint old text)
+    mask = np.zeros(warped.shape[:2], dtype=np.uint8)
+    cv2.rectangle(mask, (10, 10), (maxW-10, maxH-10), 255, -1)
+    clean_plate = cv2.inpaint(warped, mask, 3, cv2.INPAINT_TELEA)
+
+    # 4. Generate Text
+    pil_plate = Image.fromarray(clean_plate)
+    txt_layer = Image.new('RGBA', pil_plate.size, (255, 255, 255, 0))
+    d = ImageDraw.Draw(txt_layer)
+    
+    # Font Logic
+    font_bytes = Engine.get_font()
+    try:
+        f = ImageFont.truetype(font_bytes, int(maxH * 0.82)) if font_bytes else ImageFont.load_default()
+    except: f = ImageFont.load_default()
+    
+    bbox = d.textbbox((0, 0), price_text, font=f)
+    tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+    
+    # Text Color: Black with 90% opacity
+    d.text(((maxW-tw)/2, (maxH-th)/2 - bbox[1]*0.1), price_text, font=f, fill=(0, 0, 0, 230))
+    
+    # 5. BLUR MATCHING (Key Feature)
+    if blur_level > 0:
+        txt_layer = txt_layer.filter(ImageFilter.GaussianBlur(blur_level))
+        
+    pil_plate.paste(txt_layer, (0, 0), txt_layer)
+    
+    # 6. Un-Warp & Blend
+    res_warped = cv2.warpPerspective(np.array(pil_plate), M, (img_rgb.shape[1], img_rgb.shape[0]), flags=cv2.WARP_INVERSE_MAP)
+    
+    mask_full = np.zeros((img_rgb.shape[0], img_rgb.shape[1]), dtype=np.uint8)
+    cv2.fillConvexPoly(mask_full, rect.astype(int), 255)
+    mask_blur = cv2.GaussianBlur(mask_full, (5, 5), 0)
+    
+    img_f = img_rgb.astype(float)
+    res_f = res_warped.astype(float)
+    alpha = np.repeat((mask_blur.astype(float)/255.0)[:, :, np.newaxis], 3, axis=2)
+    
+    final = (res_f * alpha) + (img_f * (1.0 - alpha))
+    return Image.fromarray(final.astype(np.uint8))
+
 
 # --- MAIN ---
 
@@ -171,13 +272,9 @@ def main():
             with c_b:
                 target_price = st.text_input("Target Price", value=current_val, label_visibility="collapsed")
             
-            # Row: Tax & Features
+            # Row: Tax Mode (Lens Fix removed)
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-            t1, t2 = st.columns(2)
-            with t1:
-                tax_mode = st.selectbox("Tax", ["None", "8%", "10%"], label_visibility="collapsed")
-            with t2:
-                lens_fix = st.checkbox("Lens Fix", value=True)
+            tax_mode = st.selectbox("Tax", ["None", "8%", "10%"], label_visibility="collapsed")
                 
             # Row: Blur Match
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
