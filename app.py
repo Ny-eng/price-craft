@@ -338,10 +338,11 @@ def main():
         # Forces a clean file-like object for the canvas component
         buf = io.BytesIO()
         disp_img.save(buf, format="PNG")
+        buf.seek(0)
         disp_img = Image.open(buf)
         
         with st.expander("Troubleshoot Preview", expanded=False):
-             st.image(disp_img, caption="Source Image Verification", use_container_width=True)
+             st.image(disp_img, caption="Source Image Verification", use_column_width=True)
 
         # Auto Detect Geometry ONCE
         init_geom = None
@@ -410,8 +411,8 @@ def main():
             st.markdown("---")
             st.caption("GENERATION RESULT")
             c1, c2 = st.columns(2)
-            with c1: st.image(img_fixed, caption="Original", use_container_width=True)
-            with c2: st.image(st.session_state['result'], caption="Price Craft", use_container_width=True)
+            with c1: st.image(img_fixed, caption="Original", use_column_width=True)
+            with c2: st.image(st.session_state['result'], caption="Price Craft", use_column_width=True)
             
             buf = io.BytesIO()
             st.session_state['result'].save(buf, format="PNG")
