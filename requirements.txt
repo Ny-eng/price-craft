@@ -1,0 +1,10 @@
+streamlit==1.32.2
+streamlit-drawable-canvas==0.9.3
+opencv-python-headless
+google-generativeai
+easyocr
+Pillow
+numpy
+streamlit-drawable-canvas
+requests
+streamlit-image-comparison
