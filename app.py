@@ -2,19 +2,24 @@ import streamlit as st
 import cv2
 import numpy as np
 import io
-import math
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
-from streamlit_drawable_canvas import st_canvas
-import google.generativeai as genai
+import easyocr
 
 # --- CONSTANTS & CONFIG ---
-PAGE_TITLE = "Price Craft"
+PAGE_TITLE = "Price Craft Studio"
 PAGE_ICON = "🏷️"
 
 # --- CORE LOGIC ---
 
 class VisionEngine:
+    @staticmethod
+    @st.cache_resource
+    def get_reader():
+        """Initialize EasyOCR Reader (Cached)."""
+        # Loading English and Japanese
+        return easyocr.Reader(['ja', 'en'], gpu=False)
+
     @staticmethod
     def get_font():
         """Cache remote font for Japanese support."""
@@ -28,104 +33,100 @@ class VisionEngine:
         return st.session_state['font_cache']
 
     @staticmethod
-    def calculate_tilt(pts):
-        """Calculate the average tilt angle of the polygon."""
-        # pts is list of dicts {'x':, 'y':}
-        # Assuming sorted TL, TR, BR, BL order generally, but we just need horizontal text lines.
-        # Let's take the first two points as Top Edge if sorted.
-        p = sorted(pts, key=lambda z: z['y']) # Sort by Y to find top 2
-        top_two = sorted(p[:2], key=lambda z: z['x']) # Sort those by X
-        
-        dx = top_two[1]['x'] - top_two[0]['x']
-        dy = top_two[1]['y'] - top_two[0]['y']
-        angle = math.degrees(math.atan2(dy, dx))
-        return angle
-
-    @staticmethod
-    def auto_detect(image):
-        """Robust countour detection."""
+    def scan_all_text(image):
+        """Scans all text in the image using EasyOCR."""
         try:
-            img = np.array(image.convert('RGB'))
-            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            edged = cv2.Canny(blur, 50, 200)
-            contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+            reader = VisionEngine.get_reader()
+            img_np = np.array(image.convert('RGB'))
             
-            for c in contours:
-                peri = cv2.arcLength(c, True)
-                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-                if len(approx) == 4 and cv2.contourArea(c) > 2000:
-                    points = [{'x': int(p[0][0]), 'y': int(p[0][1])} for p in approx]
-                    angle = VisionEngine.calculate_tilt(points)
-                    return points, angle
-            return None, 0.0
-        except: return None, 0.0
+            # Run OCR
+            # detail=1 returns (bbox, text, prob)
+            results = reader.readtext(img_np)
+            
+            # Format results
+            detected_items = []
+            for (bbox, text, prob) in results:
+                # bbox is list of 4 points [[x,y], [x,y], [x,y], [x,y]]
+                # Filter low confidence or empty
+                if prob > 0.3 and text.strip():
+                    detected_items.append({
+                        'id': f"{text}_{bbox[0][0]}", # Unique ID based on text+pos
+                        'text': text,
+                        'bbox': bbox,
+                        'prob': prob
+                    })
+            return detected_items
+        except Exception as e:
+            st.error(f"OCR Error: {e}")
+            return []
 
     @staticmethod
-    def render(img_file, roi, text, blur_rad, original_size):
-        """Pipeline: Load -> Warp -> Inpaint -> Text -> Unwarp -> Blend."""
-        # Load
-        nparr = np.frombuffer(img_file.getvalue(), np.uint8)
-        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    def replace_text_items(image, items_to_modify, blur_rad=0.0):
+        """
+        Replaces specific text items in the image.
+        items_to_modify: list of dict {'bbox': ..., 'new_text': ...}
+        """
+        img_np = np.array(image.convert('RGB'))
         
-        # Warp
-        pts = np.array([[p['x'], p['y']] for p in roi], dtype='float32')
-        rect = np.zeros((4, 2), dtype="float32")
-        s = pts.sum(axis=1)
-        rect[0], rect[2] = pts[np.argmin(s)], pts[np.argmax(s)]
-        diff = np.diff(pts, axis=1)
-        rect[1], rect[3] = pts[np.argmin(diff)], pts[np.argmax(diff)]
-        (tl, tr, br, bl) = rect
+        # 1. Inpaint (Remove old text)
+        mask = np.zeros(img_np.shape[:2], dtype=np.uint8)
         
-        mW = int(max(np.linalg.norm(br-bl), np.linalg.norm(tr-tl)))
-        mH = int(max(np.linalg.norm(tr-br), np.linalg.norm(tl-bl)))
-        dst = np.array([[0, 0], [mW-1, 0], [mW-1, mH-1], [0, mH-1]], dtype="float32")
-        M = cv2.getPerspectiveTransform(rect, dst)
-        warped = cv2.warpPerspective(img_rgb, M, (mW, mH))
+        for item in items_to_modify:
+            box = np.array(item['bbox'], dtype=np.int32)
+            cv2.fillConvexPoly(mask, box, 255)
+            
+        # Dilate mask slightly to cover edges
+        kernel = np.ones((3,3), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=2)
         
-        # Inpaint
-        mask = np.zeros(warped.shape[:2], dtype=np.uint8)
-        pad = 6
-        cv2.rectangle(mask, (pad, pad), (mW-pad, mH-pad), 255, -1)
-        clean = cv2.inpaint(warped, mask, 3, cv2.INPAINT_TELEA)
+        clean_bg = cv2.inpaint(img_np, mask, 3, cv2.INPAINT_TELEA)
         
-        # Text
-        pil_c = Image.fromarray(clean)
-        txt_l = Image.new('RGBA', pil_c.size, (255, 255, 255, 0))
-        d = ImageDraw.Draw(txt_l)
-        font_b = VisionEngine.get_font()
-        try:
-            # Dynamic Font Sizing
-            f_size = int(mH * 0.85)
-            font = ImageFont.truetype(font_b, f_size) if font_b else ImageFont.load_default()
-        except: font = ImageFont.load_default()
+        # 2. Draw New Text
+        pil_img = Image.fromarray(clean_bg)
+        txt_layer = Image.new('RGBA', pil_img.size, (255, 255, 255, 0))
+        draw = ImageDraw.Draw(txt_layer)
+        font_bytes = VisionEngine.get_font()
         
-        bbox = d.textbbox((0, 0), text, font=font)
-        # Center text
-        d.text(( (mW-(bbox[2]-bbox[0]))/2, (mH-(bbox[3]-bbox[1]))/2 - bbox[1]*0.1 ), text, font=font, fill=(10, 10, 10, 240))
-        
+        for item in items_to_modify:
+            new_text = item['new_text']
+            if not new_text: continue
+            
+            box = item['bbox'] # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            
+            # Calculate Height/Width from bbox
+            tl, tr, br, bl = box
+            height = int(abs(bl[1] - tl[1]))
+            # width = int(abs(tr[0] - tl[0]))
+            
+            # Load Font (Match Height)
+            try:
+                # Heuristic: Font size is approx 80% of box height
+                f_size = int(height * 0.85)
+                if f_size < 10: f_size = 10
+                font = ImageFont.truetype(font_bytes, f_size) if font_bytes else ImageFont.load_default()
+            except: font = ImageFont.load_default()
+            
+            # Center text in bbox
+            text_bbox = draw.textbbox((0, 0), new_text, font=font)
+            t_w = text_bbox[2] - text_bbox[0]
+            t_h = text_bbox[3] - text_bbox[1]
+            
+            # Center X, Center Y of the original box
+            center_x = (tl[0] + br[0]) / 2
+            center_y = (tl[1] + br[1]) / 2
+            
+            pos_x = center_x - (t_w / 2)
+            pos_y = center_y - (t_h / 2) - (text_bbox[1] * 0.1) # Baseline correction
+            
+            # Draw (Black, high opacity)
+            draw.text((pos_x, pos_y), new_text, font=font, fill=(10, 10, 10, 240))
+
+        # 3. Blur Match
         if blur_rad > 0:
-            txt_l = txt_l.filter(ImageFilter.GaussianBlur(blur_rad))
+            txt_layer = txt_layer.filter(ImageFilter.GaussianBlur(blur_rad))
             
-        pil_c.paste(txt_l, (0,0), txt_l)
-        
-        # Unwarp
-        res_warp = cv2.warpPerspective(np.array(pil_c), M, (img_rgb.shape[1], img_rgb.shape[0]), flags=cv2.WARP_INVERSE_MAP)
-        
-        # Blend
-        full_mask = np.zeros((img_rgb.shape[0], img_rgb.shape[1]), dtype=np.uint8)
-        cv2.fillConvexPoly(full_mask, rect.astype(int), 255)
-        # Soften edges
-        full_mask = cv2.GaussianBlur(full_mask, (3, 3), 0)
-        
-        img_f = img_rgb.astype(float)
-        res_f = res_warp.astype(float)
-        alpha = np.repeat((full_mask.astype(float)/255.0)[:, :, np.newaxis], 3, axis=2)
-        
-        final = (res_f * alpha) + (img_f * (1.0 - alpha))
-        return Image.fromarray(final.astype(np.uint8))
+        pil_img.paste(txt_layer, (0,0), txt_layer)
+        return pil_img
 
 # --- UI ---
 
@@ -134,213 +135,143 @@ def inject_premium_css():
     <style>
         .stApp { background-color: #F8F9FA; color: #111; font-family: -apple-system, sans-serif; }
         
-        /* Containers */
-        .main-card {
-            background: white; padding: 2rem; border-radius: 12px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1rem;
-        }
-        
-        /* Text Inputs */
-        .stTextInput input, .stSelectbox div[data-baseweb="select"] {
+        /* Inputs */
+        .stTextInput input {
             background-color: #FFF !important;
             border: 1px solid #E0E0E0 !important;
             color: #111 !important;
             border-radius: 6px !important;
-            padding: 10px !important;
+            padding: 8px !important;
         }
         
-        /* Primary Button */
-        div[data-testid="stButton"] button {
-            border: 1px solid #E0E0E0; font-weight: 600; color: #333;
-        }
-        div[data-testid="stButton"] button:hover {
-            border-color: #000; color: #000; background: #FFF;
-        }
-        
-        /* Accent Button (Primary) */
+        /* Buttons */
         button[kind="primary"] {
             background-color: #000 !important; color: white !important; border: none !important;
         }
-        button[kind="primary"]:hover {
-            background-color: #333 !important;
+        
+        /* Text Item Row */
+        .text-row {
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #EEE;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         
-        /* Metrics */
-        .metric-box {
-            background: #F1F3F5; padding: 0.8rem; border-radius: 6px; 
-            text-align:center; font-size: 14px; font-weight: 500; color: #444;
-        }
-        .metric-val { font-size: 18px; font-weight: 700; color: #000; }
-        
-        /* Hide */
-        [data-testid="stSidebar"] { display: none; } /* NO SIDEBAR - Full Width Design */
+        /* Hide unwanted elements */
         header, footer { visibility: hidden; }
-        .block-container { padding-top: 2rem !important; max-width: 1000px !important; }
+        .block-container { padding-top: 2rem !important; max-width: 1200px !important; }
         
     </style>
     """, unsafe_allow_html=True)
 
 def main():
-    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="centered")
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
     inject_premium_css()
     
     # --- AUTH ---
     if 'auth' not in st.session_state: st.session_state.auth = False
     if not st.session_state.auth:
-        st.markdown("<h1 style='text-align:center; margin-bottom: 2rem'>Price Craft OS</h1>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1,2,1])
         with c2:
+            st.title("Price Craft Studio")
             with st.form("login"):
-                p = st.text_input("Access Key", type="password")
-                if st.form_submit_button("Enter", use_container_width=True, type="primary"):
-                    if p == st.secrets.get("PASSWORD", "apple"):
+                if st.text_input("Key", type="password") == st.secrets.get("PASSWORD", "apple"):
+                    if st.form_submit_button("Login", type="primary"):
                         st.session_state.auth = True
                         st.rerun()
-                    else: st.error("Mismatched Key")
         return
 
-    # --- APP STATE ---
-    if 'scan_res' not in st.session_state: st.session_state.scan_res = {}
+    # --- STATE MANAGEMENT ---
+    if 'ocr_results' not in st.session_state: st.session_state.ocr_results = []
     
-    # --- LAYOUT ---
-    st.markdown("## Price Craft <span style='font-size:14px; color:#888; font-weight:400'>Studio</span>", unsafe_allow_html=True)
-    
-    # 1. UPLOAD AREA
-    with st.container():
-        uploaded = st.file_uploader("Source Image", type=['png','jpg','jpeg'], label_visibility="collapsed")
+    # --- UI LAYOUT ---
+    st.markdown("### Price Craft <span style='color:#888'>Text Replacement Studio</span>", unsafe_allow_html=True)
 
+    uploaded = st.file_uploader("Upload Image", type=['png','jpg','jpeg'], label_visibility="collapsed")
+    
     if uploaded:
-        file_id = f"{uploaded.file_id}"
-        img_raw = Image.open(uploaded).convert("RGB")
-        img_fix = ImageOps.exif_transpose(img_raw)
-        
-        # 2. WORKSPACE
-        c_left, c_right = st.columns([0.35, 0.65])
-        
-        # --- LEFT PANEL: CONTROLS ---
-        with c_left:
-            st.markdown("### Controls")
-            
-            # SCAN BUTTON
-            if st.button("✨ Auto-Analyze", type="primary", use_container_width=True):
-                with st.spinner("Vision Engine Running..."):
-                    # 1. Geometry
-                    poly, angle = VisionEngine.auto_detect(img_fix)
-                    st.session_state.scan_res['poly'] = poly
-                    st.session_state.scan_res['angle'] = angle
-                    
-                    # 2. Text (Mock AI)
-                    st.session_state.scan_res['text'] = "298" 
-                    st.session_state.scan_res['conf'] = "High"
-            
-            # RESULTS DASHBOARD
-            if 'text' in st.session_state.scan_res:
-                r = st.session_state.scan_res
-                
-                # Metrics Row
-                m1, m2 = st.columns(2)
-                with m1:
-                    st.markdown(f"<div class='metric-box'>Detected<br><span class='metric-val'>{r.get('text','--')}</span></div>", unsafe_allow_html=True)
-                with m2:
-                    ang = r.get('angle', 0.0)
-                    st.markdown(f"<div class='metric-box'>Tilt<br><span class='metric-val'>{ang:.1f}°</span></div>", unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                # EDIT FORM
-                target_p = st.text_input("New Price", value=r.get('text', '298'))
-                tax_opt = st.selectbox("Tax Mode", ["None", "8%", "10%"])
-                
-                blur_v = st.slider("Blur Intensity", 0.0, 5.0, 0.5, 0.1)
-                
-                st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-                if st.button("Render Final Asset", type="primary", use_container_width=True):
-                    st.session_state['trigger_render'] = True
-            
-            else:
-                st.info("Upload image and click Auto-Analyze to begin.")
+        # Load logic
+        img_raw = Image.open(uploaded)
+        # Handle transparency
+        if img_raw.mode in ('RGBA', 'LA') or (img_raw.mode == 'P' and 'transparency' in img_raw.info):
+            bg = Image.new("RGB", img_raw.size, (255, 255, 255))
+            bg.paste(img_raw, mask=img_raw.convert('RGBA').split()[3])
+            img_fix = bg
+        else:
+            img_fix = img_raw.convert("RGB")
+        img_fix = ImageOps.exif_transpose(img_fix)
 
-        # --- RIGHT PANEL: CANVAS & PREVIEW ---
-        with c_right:
-            tab1, tab2 = st.tabs(["Editor", "Result"])
+        c_left, c_right = st.columns([0.4, 0.6])
+        
+        # --- LEFT: CONTROLS & DATA ---
+        with c_left:
+            if st.button("🔍 Scan All Text", type="primary", use_container_width=True):
+                with st.spinner("Analyzing image structure (OCR)..."):
+                    st.session_state.ocr_results = VisionEngine.scan_all_text(img_fix)
             
-            with tab1:
-                # CANVAS SETUP
-                # Responsive width
-                disp_w = 600
-                scale = disp_w / img_fix.width
-                disp_h = int(img_fix.height * scale)
+            # BLUR SETTING
+            blur_v = st.slider("Blur Matching (px)", 0.0, 5.0, 0.5, 0.1)
+
+            st.markdown("---")
+            st.caption("DETECTED TEXT")
+            
+            # DYNAMIC FORM
+            items_to_modify = []
+            
+            if st.session_state.ocr_results:
+                # Scrollable container for many items
+                with st.container(height=500):
+                    for i, item in enumerate(st.session_state.ocr_results):
+                        # Layout: Detected Text | Arrow | Input for New
+                        c1, c2, c3 = st.columns([0.3, 0.1, 0.6])
+                        with c1:
+                            st.text_input(f"Org-{i}", value=item['text'], disabled=True, label_visibility="collapsed")
+                        with c2:
+                            st.markdown("➔")
+                        with c3:
+                            new_val = st.text_input(
+                                f"New-{i}", 
+                                placeholder="Keep original", 
+                                key=f"input_{item['id']}",
+                                label_visibility="collapsed"
+                            )
+                            if new_val and new_val != "":
+                                items_to_modify.append({
+                                    'bbox': item['bbox'],
+                                    'new_text': new_val
+                                })
+            else:
+                st.info("Click 'Scan All Text' to begin.")
                 
-                disp_img = img_fix.resize((disp_w, disp_h))
-                
-                # Initial Drawing from Auto-Detect
-                init_draw = None
-                if 'poly' in st.session_state.scan_res:
-                    pts = st.session_state.scan_res['poly']
-                    if pts:
-                        # Scale points
-                        s_pts = [[p['x']*scale, p['y']*scale] for p in pts]
-                        path_svg = [["M", s_pts[0][0], s_pts[0][1]], 
-                                    ["L", s_pts[1][0], s_pts[1][1]],
-                                    ["L", s_pts[2][0], s_pts[2][1]],
-                                    ["L", s_pts[3][0], s_pts[3][1]],
-                                    ["Z"]]
-                        init_draw = {
-                            "version": "4.4.0",
-                            "objects": [{
-                                "type": "path", "originX": "left", "originY": "top", "left": 0, "top": 0,
-                                "fill": "rgba(255, 0, 0, 0.2)", "stroke": "red", "strokeWidth": 2,
-                                "path": path_svg
-                            }]
-                        }
-                
-                st.caption("Adjust the Red Box to match the price tag.")
-                canvas = st_canvas(
-                    fill_color="rgba(255, 0, 0, 0.2)",
-                    stroke_width=2,
-                    stroke_color="red",
-                    background_image=disp_img,
-                    initial_drawing=init_draw,
-                    update_streamlit=True,
-                    height=disp_h,
-                    width=disp_w,
-                    drawing_mode="polygon",
-                    key=f"editor_{file_id}_{st.session_state.scan_res.get('angle',0)}"
-                )
-                
-            with tab2:
-                if st.session_state.get('trigger_render', False):
-                    # EXECUTE RENDER
-                    valid_roi = None
-                    # 1. Try get from Canvas (User Edit)
-                    if canvas.json_data and canvas.json_data['objects']:
-                         path = canvas.json_data['objects'][0]['path']
-                         # Filter 'M' and 'L' commands
-                         pts = [p for p in path if p[0] in ['M','L']]
-                         if len(pts) >= 4:
-                             valid_roi = [{'x': p[1]/scale, 'y': p[2]/scale} for p in pts[:4]]
-                    
-                    if valid_roi:
-                        # Format Text
-                        u_price = target_p
-                        if u_price.isdigit() and tax_opt != "None":
-                            r = 1.08 if tax_opt == "8%" else 1.10
-                            u_price = f"¥{u_price} (税込¥{int(int(u_price)*r)})"
-                        elif u_price.isdigit():
-                            u_price = f"¥{u_price}"
-                            
-                        final_img = VisionEngine.render(uploaded, valid_roi, u_price, blur_v, img_fix.size)
-                        st.session_state['final_out'] = final_img
-                    st.session_state['trigger_render'] = False # Reset
-                
-                if 'final_out' in st.session_state:
-                    st.image(st.session_state['final_out'], use_column_width=True)
-                    
-                    buf = io.BytesIO()
-                    st.session_state['final_out'].save(buf, format="PNG")
-                    st.download_button("Download High-Res", buf.getvalue(), "price_craft.png", "image/png", type="primary", use_container_width=True)
+            st.markdown("---")
+            if st.button("✨ Apply Changes", type="primary", use_container_width=True):
+                if items_to_modify:
+                    with st.spinner("Rendering changes..."):
+                        res = VisionEngine.replace_text_items(img_fix, items_to_modify, blur_v)
+                        st.session_state['final_result'] = res
                 else:
-                    st.info("Click 'Render Final Asset' to generate.")
+                    st.toast("No changes entered.")
+
+        # --- RIGHT: PREVIEW ---
+        with c_right:
+            tab_view = st.tabs(["Result", "Original"])
+            with tab_view[0]:
+                if 'final_result' in st.session_state:
+                    st.image(st.session_state['final_result'], caption="Modified Image", use_column_width=True)
+                    
+                    # Download
+                    buf = io.BytesIO()
+                    st.session_state['final_result'].save(buf, format="PNG")
+                    st.download_button("Download Image", buf.getvalue(), "modified_price.png", "image/png", type="primary")
+                else:
+                    st.image(img_fix, caption="Original Image", use_column_width=True)
+            
+            with tab_view[1]:
+                st.image(img_fix, use_column_width=True)
 
 if __name__ == "__main__":
     main()
