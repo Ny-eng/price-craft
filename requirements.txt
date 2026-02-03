@@ -1,0 +1,9 @@
+streamlit
+opencv-python-headless
+google-generativeai
+easyocr
+Pillow
+numpy
+streamlit-drawable-canvas
+requests
+streamlit-image-comparison
