@@ -280,7 +280,7 @@ def main():
             c_ai, c_res = st.columns([0.2, 0.8])
             
             # AI Trigger
-            if st.button("Auto-Detect", type="secondary", icon="✨", use_container_width=True):
+            if st.button("Auto-Detect", type="secondary", use_container_width=True):
                  try:
                     with st.spinner("Thinking..."):
                         api_key = st.secrets.get("GEMINI_API_KEY")
