@@ -135,6 +135,9 @@ def inject_premium_css():
     <style>
         .stApp { background-color: #F8F9FA; color: #111; font-family: -apple-system, sans-serif; }
         
+        /* Force Headers Black */
+        h1, h2, h3 { color: #000000 !important; }
+        
         /* Inputs */
         .stTextInput input {
             background-color: #FFF !important;
@@ -189,7 +192,7 @@ def main():
     if 'ocr_results' not in st.session_state: st.session_state.ocr_results = []
     
     # --- UI LAYOUT ---
-    st.markdown("### Price Craft <span style='color:#888'>Text Replacement Studio</span>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color:black; margin-top:0'>Price Craft <span style='color:#888; font-weight:400'>Studio</span></h3>", unsafe_allow_html=True)
 
     uploaded = st.file_uploader("Upload Image", type=['png','jpg','jpeg'], label_visibility="collapsed")
     
