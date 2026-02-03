@@ -296,13 +296,24 @@ def main():
     if uploaded:
         file_sig = f"{uploaded.file_id}"
         
-        # Load & Deep Clean (Fixes Black Screen/ICC Profile issues)
-        img_raw = Image.open(uploaded).convert("RGB")
-        img_fixed = ImageOps.exif_transpose(img_raw)
-        
-        # NUCLEAR OPTION: Scrub all metadata/ICC profiles by recreating from pure pixel data
-        # This fixes browser canvas rendering issues with specific color profiles (e.g. Display P3)
+        # Load & Handle Transparency (Fixes Black Screen on Transparent PNGs)
+        img_raw = Image.open(uploaded)
+        if img_raw.mode in ('RGBA', 'LA') or (img_raw.mode == 'P' and 'transparency' in img_raw.info):
+            # Create white background for transparent images
+            alpha = img_raw.convert('RGBA')
+            bg = Image.new("RGB", alpha.size, (255, 255, 255))
+            bg.paste(alpha, mask=alpha.split()[3])
+            img_fixed = bg
+        else:
+            img_fixed = img_raw.convert("RGB")
+            
+        img_fixed = ImageOps.exif_transpose(img_fixed)
+        # Deep scrub
         img_fixed = Image.fromarray(np.array(img_fixed))
+        
+        # Display Image Info (Data Amount)
+        file_size_mb = uploaded.size / (1024*1024)
+        st.sidebar.markdown(f"<div style='margin-top:-10px; font-size:11px; color:#A3A3A3; text-align:right'>{img_fixed.width}x{img_fixed.height}px • {file_size_mb:.2f}MB</div>", unsafe_allow_html=True)
         
         # Calculate Blur ONCE
         if st.session_state.get('last_blur_sig') != file_sig:
@@ -314,12 +325,23 @@ def main():
         w, h = img_fixed.size
         
         # Fit to view
-        max_v_w = 1200
+        max_v_w = 1000
         view_scale = 1.0
-        disp_img = img_fixed
+        
         if w > max_v_w:
             view_scale = max_v_w / w
-            disp_img = img_fixed.resize((max_v_w, int(h * view_scale)))
+            disp_img = img_fixed.resize((max_v_w, int(h * view_scale)), Image.Resampling.LANCZOS)
+        else:
+            disp_img = img_fixed.copy()
+            
+        # --- CRITIAL FIX: BUFFER ROUND-TRIP ---
+        # Forces a clean file-like object for the canvas component
+        buf = io.BytesIO()
+        disp_img.save(buf, format="PNG")
+        disp_img = Image.open(buf)
+        
+        with st.expander("Troubleshoot Preview", expanded=False):
+             st.image(disp_img, caption="Source Image Verification", use_container_width=True)
 
         # Auto Detect Geometry ONCE
         init_geom = None
