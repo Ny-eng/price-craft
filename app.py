@@ -33,40 +33,49 @@ class VisionEngine:
         return st.session_state['font_cache']
 
     @staticmethod
-    def scan_all_text(image):
-        """Scans all text in the image using EasyOCR."""
+    @st.cache_data(show_spinner=False)
+    def scan_all_text(image_bytes):
+        """Scans all text in the image using EasyOCR with optimized params for price tags."""
         try:
             reader = VisionEngine.get_reader()
-            img_np = np.array(image.convert('RGB'))
+            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+            img_np = np.array(image)
             
-            # Run OCR
-            # detail=1 returns (bbox, text, prob)
-            results = reader.readtext(img_np)
+            # Run OCR with Tuned Parameters for Price Tags (Big Numbers)
+            results = reader.readtext(
+                img_np,
+                detail=1,
+                mag_ratio=1.5,       # Enlarge image to see text better
+                text_threshold=0.5,  # Lower threshold to catch colored text
+                low_text=0.3,        # Catch lower confidence text
+                contrast_ths=0.1,    # Text/Background contrast threshold
+                adjust_contrast=0.5  # Boost contrast before detection
+            )
             
             # Format results
             detected_items = []
             for (bbox, text, prob) in results:
-                # bbox is list of 4 points [[x,y], [x,y], [x,y], [x,y]]
-                # Filter low confidence or empty
-                if prob > 0.3 and text.strip():
+                # Filter noise
+                if prob > 0.2 and text.strip():
                     detected_items.append({
-                        'id': f"{text}_{bbox[0][0]}", # Unique ID based on text+pos
+                        'id': f"{text}_{bbox[0][0]}", 
                         'text': text,
                         'bbox': bbox,
                         'prob': prob
                     })
+            
+            # Sort by Y position (Top to Bottom)
+            detected_items.sort(key=lambda x: x['bbox'][0][1])
             return detected_items
         except Exception as e:
-            st.error(f"OCR Error: {e}")
+            st.error(f"OCR Error: {str(e)}")
             return []
 
     @staticmethod
-    def replace_text_items(image, items_to_modify, blur_rad=0.0):
-        """
-        Replaces specific text items in the image.
-        items_to_modify: list of dict {'bbox': ..., 'new_text': ...}
-        """
-        img_np = np.array(image.convert('RGB'))
+    def replace_text_items(image_bytes, items_to_modify, blur_rad=0.0):
+        """Replaces specific text items in the image."""
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img_np = np.array(image)
         
         # 1. Inpaint (Remove old text)
         mask = np.zeros(img_np.shape[:2], dtype=np.uint8)
@@ -75,9 +84,8 @@ class VisionEngine:
             box = np.array(item['bbox'], dtype=np.int32)
             cv2.fillConvexPoly(mask, box, 255)
             
-        # Dilate mask slightly to cover edges
         kernel = np.ones((3,3), np.uint8)
-        mask = cv2.dilate(mask, kernel, iterations=2)
+        mask = cv2.dilate(mask, kernel, iterations=3) # Stronger dilation
         
         clean_bg = cv2.inpaint(img_np, mask, 3, cv2.INPAINT_TELEA)
         
@@ -91,35 +99,31 @@ class VisionEngine:
             new_text = item['new_text']
             if not new_text: continue
             
-            box = item['bbox'] # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-            
-            # Calculate Height/Width from bbox
+            box = item['bbox'] 
             tl, tr, br, bl = box
             height = int(abs(bl[1] - tl[1]))
-            # width = int(abs(tr[0] - tl[0]))
             
-            # Load Font (Match Height)
+            # Determine Color (Simple Heuristic: Use avg color of surrounding or default black)
+            # Defaulting to High-Contrast Dark Gray/Black for Prices
+            text_color = (10, 10, 10, 240)
+            
             try:
-                # Heuristic: Font size is approx 80% of box height
                 f_size = int(height * 0.85)
-                if f_size < 10: f_size = 10
+                if f_size < 12: f_size = 12
                 font = ImageFont.truetype(font_bytes, f_size) if font_bytes else ImageFont.load_default()
             except: font = ImageFont.load_default()
             
-            # Center text in bbox
             text_bbox = draw.textbbox((0, 0), new_text, font=font)
             t_w = text_bbox[2] - text_bbox[0]
             t_h = text_bbox[3] - text_bbox[1]
             
-            # Center X, Center Y of the original box
             center_x = (tl[0] + br[0]) / 2
             center_y = (tl[1] + br[1]) / 2
             
             pos_x = center_x - (t_w / 2)
-            pos_y = center_y - (t_h / 2) - (text_bbox[1] * 0.1) # Baseline correction
+            pos_y = center_y - (t_h / 2) - (text_bbox[1] * 0.1)
             
-            # Draw (Black, high opacity)
-            draw.text((pos_x, pos_y), new_text, font=font, fill=(10, 10, 10, 240))
+            draw.text((pos_x, pos_y), new_text, font=font, fill=text_color)
 
         # 3. Blur Match
         if blur_rad > 0:
@@ -133,40 +137,69 @@ class VisionEngine:
 def inject_premium_css():
     st.markdown("""
     <style>
-        .stApp { background-color: #F8F9FA; color: #111; font-family: -apple-system, sans-serif; }
+        /* FORCE LIGHT THEME & RESET */
+        :root {
+            --primary-color: #000000;
+            --background-color: #ffffff;
+            --secondary-background-color: #f8f9fa;
+            --text-color: #000000;
+            --font: -apple-system, BlinkMacSystemFont, sans-serif;
+        }
         
-        /* Force Headers Black */
-        h1, h2, h3 { color: #000000 !important; }
+        /* App Background */
+        .stApp {
+            background-color: #ffffff !important;
+            color: #000000 !important;
+        }
         
-        /* Inputs */
-        .stTextInput input {
-            background-color: #FFF !important;
-            border: 1px solid #E0E0E0 !important;
-            color: #111 !important;
-            border-radius: 6px !important;
-            padding: 8px !important;
+        /* Headers */
+        h1, h2, h3, h4, h5, h6, .stMarkdown h3 { 
+            color: #000000 !important; 
+            font-weight: 700 !important;
+        }
+        
+        /* Inputs - High Visibility */
+        .stTextInput input, .stSelectbox div[data-baseweb="select"] {
+            background-color: #ffffff !important;
+            color: #000000 !important;
+            -webkit-text-fill-color: #000000 !important;
+            border: 2px solid #e5e5e5 !important;
+            border-radius: 8px !important;
+            font-weight: 500 !important;
+        }
+        .stTextInput input:focus {
+            border-color: #000000 !important;
+        }
+        
+        /* Disabled Inputs (Detected Text) */
+        .stTextInput input:disabled {
+            background-color: #f1f3f5 !important;
+            color: #333333 !important;
+            -webkit-text-fill-color: #333333 !important;
+            border-color: #f1f3f5 !important;
         }
         
         /* Buttons */
         button[kind="primary"] {
-            background-color: #000 !important; color: white !important; border: none !important;
+            background-color: #000000 !important;
+            color: #ffffff !important;
+            border: none !important;
+            font-weight: 600 !important;
         }
         
-        /* Text Item Row */
-        .text-row {
-            background: white;
-            padding: 10px;
-            border-radius: 8px;
-            border: 1px solid #EEE;
-            margin-bottom: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
+        /* Tables/Lists */
+        .element-container { color: #000 !important; }
         
-        /* Hide unwanted elements */
+        /* Layout */
+        .block-container { 
+            padding-top: 2rem !important; 
+            padding-bottom: 3rem !important;
+            max-width: 1400px !important;
+        }
         header, footer { visibility: hidden; }
-        .block-container { padding-top: 2rem !important; max-width: 1200px !important; }
+        
+        /* Custom Labels */
+        label { color: #444 !important; font-size: 13px !important; font-weight: 600 !important; }
         
     </style>
     """, unsafe_allow_html=True)
@@ -178,103 +211,108 @@ def main():
     # --- AUTH ---
     if 'auth' not in st.session_state: st.session_state.auth = False
     if not st.session_state.auth:
-        c1, c2, c3 = st.columns([1,2,1])
+        c1, c2, c3 = st.columns([1,1,1])
         with c2:
-            st.title("Price Craft Studio")
+            st.markdown("<br><br><h2 style='text-align:center'>Price Craft Studio</h2>", unsafe_allow_html=True)
             with st.form("login"):
-                if st.text_input("Key", type="password") == st.secrets.get("PASSWORD", "apple"):
-                    if st.form_submit_button("Login", type="primary"):
+                pwd = st.text_input("Access Key", type="password")
+                submit = st.form_submit_button("Sign In", type="primary", use_container_width=True)
+                if submit:
+                    if pwd == st.secrets.get("PASSWORD", "apple"):
                         st.session_state.auth = True
                         st.rerun()
+                    else: st.error("Invalid Key")
         return
 
-    # --- STATE MANAGEMENT ---
+    # --- STATE ---
     if 'ocr_results' not in st.session_state: st.session_state.ocr_results = []
     
-    # --- UI LAYOUT ---
-    st.markdown("<h3 style='color:black; margin-top:0'>Price Craft <span style='color:#888; font-weight:400'>Studio</span></h3>", unsafe_allow_html=True)
+    # --- HEADER ---
+    st.markdown("<h3 style='margin-bottom:20px'>Price Craft <span style='color:#999; font-weight:400'>Studio</span></h3>", unsafe_allow_html=True)
 
     uploaded = st.file_uploader("Upload Image", type=['png','jpg','jpeg'], label_visibility="collapsed")
     
     if uploaded:
-        # Load logic
-        img_raw = Image.open(uploaded)
-        # Handle transparency
-        if img_raw.mode in ('RGBA', 'LA') or (img_raw.mode == 'P' and 'transparency' in img_raw.info):
-            bg = Image.new("RGB", img_raw.size, (255, 255, 255))
-            bg.paste(img_raw, mask=img_raw.convert('RGBA').split()[3])
-            img_fix = bg
-        else:
-            img_fix = img_raw.convert("RGB")
-        img_fix = ImageOps.exif_transpose(img_fix)
-
-        c_left, c_right = st.columns([0.4, 0.6])
+        # File Handling: Read bytes once to share between EasyOCR/PIL without seeking issues
+        file_bytes = uploaded.getvalue()
         
-        # --- LEFT: CONTROLS & DATA ---
-        with c_left:
-            if st.button("🔍 Scan All Text", type="primary", use_container_width=True):
-                with st.spinner("Analyzing image structure (OCR)..."):
-                    st.session_state.ocr_results = VisionEngine.scan_all_text(img_fix)
-            
-            # BLUR SETTING
-            blur_v = st.slider("Blur Matching (px)", 0.0, 5.0, 0.5, 0.1)
+        # Display Logic
+        img_pil = Image.open(io.BytesIO(file_bytes))
+        # Handle alpha
+        if img_pil.mode in ('RGBA', 'LA') or (img_pil.mode == 'P' and 'transparency' in img_pil.info):
+            bg = Image.new("RGB", img_pil.size, (255, 255, 255))
+            bg.paste(img_pil, mask=img_pil.convert('RGBA').split()[3])
+            img_pil = bg
+        else:
+            img_pil = img_pil.convert("RGB")
+        img_fix = ImageOps.exif_transpose(img_pil)
 
-            st.markdown("---")
-            st.caption("DETECTED TEXT")
+        c_left, c_right = st.columns([0.4, 0.6], gap="large")
+        
+        # --- LEFT PANEL: CONTROL ---
+        with c_left:
+            st.markdown("#### 1. Analyze")
+            if st.button("🔍 Scan Text", type="primary", use_container_width=True):
+                with st.spinner("Scanning image... (This may take a moment)"):
+                    # Use the raw bytes_io for Thread safety in OCR
+                    st.session_state.ocr_results = VisionEngine.scan_all_text(file_bytes)
+                    if not st.session_state.ocr_results:
+                        st.warning("No text detected. Try a clearer image.")
             
-            # DYNAMIC FORM
+            # SETTINGS
+            with st.expander("Settings", expanded=False):
+                blur_v = st.slider("Blur Intensity", 0.0, 5.0, 0.5, 0.1)
+
+            # TEXT EDITOR
+            st.markdown("#### 2. Edit Text")
             items_to_modify = []
             
             if st.session_state.ocr_results:
-                # Scrollable container for many items
-                with st.container(height=500):
+                with st.container(height=600):
                     for i, item in enumerate(st.session_state.ocr_results):
-                        # Layout: Detected Text | Arrow | Input for New
-                        c1, c2, c3 = st.columns([0.3, 0.1, 0.6])
+                        # Use a clean 3-col layout
+                        c1, c2, c3 = st.columns([0.15, 0.35, 0.5])
                         with c1:
-                            st.text_input(f"Org-{i}", value=item['text'], disabled=True, label_visibility="collapsed")
+                            # Show confidence as tiny text
+                            st.caption(f"{int(item['prob']*100)}%")
                         with c2:
-                            st.markdown("➔")
+                            # Original text (Disabled Input)
+                            st.text_input(f"org_{i}", value=item['text'], disabled=True, label_visibility="collapsed", key=f"dis_{item['id']}")
                         with c3:
+                            # New Input
                             new_val = st.text_input(
-                                f"New-{i}", 
-                                placeholder="Keep original", 
+                                f"new_{i}", 
+                                placeholder="Change to...", 
                                 key=f"input_{item['id']}",
                                 label_visibility="collapsed"
                             )
-                            if new_val and new_val != "":
-                                items_to_modify.append({
-                                    'bbox': item['bbox'],
-                                    'new_text': new_val
-                                })
-            else:
-                st.info("Click 'Scan All Text' to begin.")
-                
-            st.markdown("---")
-            if st.button("✨ Apply Changes", type="primary", use_container_width=True):
+                            if new_val:
+                                items_to_modify.append({'bbox': item['bbox'], 'new_text': new_val})
+            elif uploaded:
+                st.info("Click 'Scan Text' to detect price tags.")
+            
+            st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+            if st.button("✨ Render Image", type="primary", use_container_width=True):
                 if items_to_modify:
-                    with st.spinner("Rendering changes..."):
-                        res = VisionEngine.replace_text_items(img_fix, items_to_modify, blur_v)
+                    with st.spinner("Processing..."):
+                        # Re-pass file_bytes to ensure fresh read
+                        res = VisionEngine.replace_text_items(file_bytes, items_to_modify, blur_v)
                         st.session_state['final_result'] = res
                 else:
-                    st.toast("No changes entered.")
+                    st.toast("No text changes entered.")
 
-        # --- RIGHT: PREVIEW ---
+        # --- RIGHT PANEL: VIEW ---
         with c_right:
-            tab_view = st.tabs(["Result", "Original"])
-            with tab_view[0]:
-                if 'final_result' in st.session_state:
-                    st.image(st.session_state['final_result'], caption="Modified Image", use_column_width=True)
-                    
-                    # Download
-                    buf = io.BytesIO()
-                    st.session_state['final_result'].save(buf, format="PNG")
-                    st.download_button("Download Image", buf.getvalue(), "modified_price.png", "image/png", type="primary")
-                else:
-                    st.image(img_fix, caption="Original Image", use_column_width=True)
-            
-            with tab_view[1]:
-                st.image(img_fix, use_column_width=True)
+            st.markdown("#### Preview")
+            if 'final_result' in st.session_state:
+                st.image(st.session_state['final_result'], caption="Result", use_column_width=True)
+                
+                # Download
+                buf = io.BytesIO()
+                st.session_state['final_result'].save(buf, format="PNG")
+                st.download_button("Download High-Res", buf.getvalue(), "price_craft.png", "image/png", type="primary", use_container_width=True)
+            else:
+                st.image(img_fix, caption="Original", use_column_width=True)
 
 if __name__ == "__main__":
     main()
