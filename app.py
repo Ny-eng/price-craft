@@ -296,9 +296,13 @@ def main():
     if uploaded:
         file_sig = f"{uploaded.file_id}"
         
-        # Load & optimize
+        # Load & Deep Clean (Fixes Black Screen/ICC Profile issues)
         img_raw = Image.open(uploaded).convert("RGB")
         img_fixed = ImageOps.exif_transpose(img_raw)
+        
+        # NUCLEAR OPTION: Scrub all metadata/ICC profiles by recreating from pure pixel data
+        # This fixes browser canvas rendering issues with specific color profiles (e.g. Display P3)
+        img_fixed = Image.fromarray(np.array(img_fixed))
         
         # Calculate Blur ONCE
         if st.session_state.get('last_blur_sig') != file_sig:
